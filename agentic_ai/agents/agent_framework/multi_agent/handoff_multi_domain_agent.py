@@ -26,14 +26,18 @@ Architecture:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
+from threading import Lock as ThreadLock
 from typing import Any, Dict, List, Optional
 
 from agent_framework import (
     Agent as FrameworkAgent,
     ChatOptions,
+    CheckpointStorage,
     MCPStreamableHTTPTool,
+    WorkflowCheckpoint,
 )
 from agent_framework.openai import OpenAIChatClient
 from agent_framework_orchestrations import (
@@ -44,10 +48,6 @@ from agent_framework_orchestrations import (
 
 from agents.base_agent import BaseAgent, ToolCallTrackingMixin
 from agents.agent_framework.utils import create_filtered_tool_list
-from agents.agent_framework.multi_agent.checkpoint_storage import (
-    create_checkpoint_storage,
-    prune_checkpoints,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -147,10 +147,74 @@ DOMAINS: Dict[str, Dict[str, Any]] = {
 }
 
 
-class _CheckpointRetention:
-    """How many checkpoints per workflow to keep on disk/in-memory."""
+class _DictCheckpointStorage(CheckpointStorage):
+    """Dictionary-backed ``CheckpointStorage`` shared via the session state store.
 
-    DEFAULT = 5
+    Survives across BaseAgent instances within the same session so that the
+    HandoffBuilder workflow can resume mid-conversation on subsequent
+    requests.
+    """
+
+    _RETENTION = 5
+
+    def __init__(self, backing: Dict[str, Any]) -> None:
+        self._backing = backing
+        self._checkpoints: Dict[str, Dict[str, Any]] = backing.setdefault("checkpoints", {})
+        self._async_lock = asyncio.Lock()
+        self._sync_lock = ThreadLock()
+
+    async def save(self, checkpoint: WorkflowCheckpoint) -> str:
+        async with self._async_lock:
+            self._checkpoints[checkpoint.checkpoint_id] = checkpoint.to_dict()
+            self._backing["latest_checkpoint"] = checkpoint.checkpoint_id
+            self._backing["workflow_name"] = checkpoint.workflow_name
+
+            if len(self._checkpoints) > self._RETENTION:
+                sorted_ids = sorted(
+                    self._checkpoints.items(),
+                    key=lambda item: (item[1].get("timestamp", ""), item[1].get("iteration_count", 0)),
+                )
+                for cid, _ in sorted_ids[: -self._RETENTION]:
+                    self._checkpoints.pop(cid, None)
+            return checkpoint.checkpoint_id
+
+    async def load(self, checkpoint_id: str) -> WorkflowCheckpoint | None:
+        async with self._async_lock:
+            data = self._checkpoints.get(checkpoint_id)
+            if not data:
+                return None
+            return WorkflowCheckpoint.from_dict(data)
+
+    async def list_checkpoint_ids(self, *, workflow_name: str) -> List[str]:
+        async with self._async_lock:
+            return [cid for cid, d in self._checkpoints.items() if d.get("workflow_name") == workflow_name]
+
+    async def list_checkpoints(self, *, workflow_name: str) -> List[WorkflowCheckpoint]:
+        async with self._async_lock:
+            ids = [cid for cid, d in self._checkpoints.items() if d.get("workflow_name") == workflow_name]
+            return [WorkflowCheckpoint.from_dict(self._checkpoints[cid]) for cid in ids]
+
+    async def delete(self, checkpoint_id: str) -> bool:
+        async with self._async_lock:
+            removed = self._checkpoints.pop(checkpoint_id, None)
+            if removed and self._backing.get("latest_checkpoint") == checkpoint_id:
+                self._backing.pop("latest_checkpoint", None)
+            return removed is not None
+
+    async def get_latest(self, *, workflow_name: str) -> WorkflowCheckpoint | None:
+        async with self._async_lock:
+            latest_id = self._backing.get("latest_checkpoint")
+            if not latest_id:
+                return None
+            data = self._checkpoints.get(latest_id)
+            if not data or data.get("workflow_name") != workflow_name:
+                return None
+            return WorkflowCheckpoint.from_dict(data)
+
+    @property
+    def latest_checkpoint_id(self) -> str | None:
+        with self._sync_lock:
+            return self._backing.get("latest_checkpoint")
 
 
 class Agent(ToolCallTrackingMixin, BaseAgent):
@@ -171,13 +235,11 @@ class Agent(ToolCallTrackingMixin, BaseAgent):
         self._domain_agents: Dict[str, FrameworkAgent] = {}
         self._mcp_tool: Optional[MCPStreamableHTTPTool] = None
 
-        # Checkpoint storage uses the built-in 1.2.1 backends (in-memory by
-        # default; FileCheckpointStorage / CosmosCheckpointStorage when
-        # WORKFLOW_CHECKPOINT_BACKEND is set). The helper caches one storage
-        # instance per session inside the process so successive HTTP requests
-        # share state.
-        self._workflow_name = f"handoff-{session_id}"
-        self._checkpoint_storage = create_checkpoint_storage(session_id)
+        # Checkpoint storage is backed by the per-session state_store so the
+        # workflow's conversation state survives across HTTP requests.
+        self._handoff_state_key = f"{session_id}_handoff_state"
+        backing = state_store.setdefault(self._handoff_state_key, {})
+        self._checkpoint_storage = _DictCheckpointStorage(backing)
 
         # Track the pending ``request_info`` ID so the next turn can resume.
         self._pending_request_id_key = f"{session_id}_handoff_pending_req"
@@ -224,10 +286,10 @@ class Agent(ToolCallTrackingMixin, BaseAgent):
         has_api_key = bool(self.azure_openai_key)
         has_credential = bool(self.azure_credential)
 
-        if not all([self.azure_deployment, self.azure_openai_endpoint, self.api_version]):
+        if not all([self.azure_deployment, self.azure_openai_endpoint]):
             raise RuntimeError(
                 "Azure OpenAI configuration is incomplete. Ensure "
-                "AZURE_OPENAI_CHAT_DEPLOYMENT, AZURE_OPENAI_ENDPOINT, and AZURE_OPENAI_API_VERSION are set."
+                "AZURE_OPENAI_CHAT_DEPLOYMENT and AZURE_OPENAI_ENDPOINT are set."
             )
         if not has_api_key and not has_credential:
             raise RuntimeError(
@@ -249,7 +311,6 @@ class Agent(ToolCallTrackingMixin, BaseAgent):
                 api_key=self.azure_openai_key,
                 model=self.azure_deployment,
                 azure_endpoint=self.azure_openai_endpoint,
-                api_version=self.api_version,
             )
             logger.info("[HANDOFF] Using API key authentication for Azure OpenAI")
         else:
@@ -257,7 +318,6 @@ class Agent(ToolCallTrackingMixin, BaseAgent):
                 credential=self.azure_credential,
                 model=self.azure_deployment,
                 azure_endpoint=self.azure_openai_endpoint,
-                api_version=self.api_version,
             )
             logger.info("[HANDOFF] Using managed identity authentication for Azure OpenAI")
 
@@ -278,7 +338,7 @@ class Agent(ToolCallTrackingMixin, BaseAgent):
                 description=cfg["description"],
                 instructions=cfg["instructions"],
                 tools=domain_tools,
-                default_options=ChatOptions(model=self.azure_deployment),
+                default_options=ChatOptions(model=self.openai_model_name),
                 require_per_service_call_history_persistence=True,
             )
             await agent.__aenter__()
@@ -299,7 +359,7 @@ class Agent(ToolCallTrackingMixin, BaseAgent):
         # can route anywhere" behaviour.
         self._workflow = (
             HandoffBuilder(
-                name=self._workflow_name,
+                name=f"handoff-{self.session_id}",
                 participants=list(self._domain_agents.values()),
             )
             .with_start_agent(self._domain_agents[start_id])
@@ -342,13 +402,7 @@ class Agent(ToolCallTrackingMixin, BaseAgent):
         self._current_turn += 1
         self.state_store[self._turn_key] = self._current_turn
 
-        # Look up the most recent checkpoint via the public 1.2.x
-        # CheckpointStorage protocol so any backend (memory / file / cosmos)
-        # works without bespoke plumbing.
-        latest_checkpoint_obj = await self._checkpoint_storage.get_latest(
-            workflow_name=self._workflow_name
-        )
-        latest_checkpoint = latest_checkpoint_obj.checkpoint_id if latest_checkpoint_obj else None
+        latest_checkpoint = self._checkpoint_storage.latest_checkpoint_id
 
         # Resume an in-flight workflow (typical path after the first turn) by
         # responding to the pending HandoffAgentUserRequest with the new user
@@ -443,15 +497,6 @@ class Agent(ToolCallTrackingMixin, BaseAgent):
             ]
         )
         self._setstate({"mode": "handoff_multi_domain", "current_domain": self._current_domain})
-
-        # Cap retained checkpoints to avoid unbounded growth across long
-        # conversations; mirrors the previous _RETENTION=5 behaviour but uses
-        # the public CheckpointStorage protocol so any backend benefits.
-        await prune_checkpoints(
-            self._checkpoint_storage,
-            self._workflow_name,
-            retain=_CheckpointRetention.DEFAULT,
-        )
 
         return assistant_response
 

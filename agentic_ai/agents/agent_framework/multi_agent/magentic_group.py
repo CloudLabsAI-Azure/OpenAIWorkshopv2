@@ -221,14 +221,11 @@ DO NOT OUTPUT ANYTHING OTHER THAN JSON, AND DO NOT DEVIATE FROM THIS SCHEMA:
         return cleaned_answer
 
     def _validate_configuration(self) -> None:
-        if not all([self.azure_deployment, self.azure_openai_endpoint, self.api_version]):
+        if not all([self.azure_deployment, self.azure_openai_endpoint]):
             raise RuntimeError(
-                "Azure OpenAI configuration is incomplete. Ensure AZURE_OPENAI_CHAT_DEPLOYMENT, "
-                "AZURE_OPENAI_ENDPOINT, and AZURE_OPENAI_API_VERSION are set."
+                "Azure OpenAI configuration is incomplete. Ensure AZURE_OPENAI_CHAT_DEPLOYMENT "
+                "and AZURE_OPENAI_ENDPOINT are set."
             )
-        # Either an API key or a managed-identity credential must be available.
-        # _build_chat_client falls back to azure_credential when azure_openai_key
-        # is unset; the other agents in this package follow the same pattern.
         if not self.azure_openai_key and not getattr(self, "azure_credential", None):
             raise RuntimeError(
                 "Azure OpenAI authentication is not configured. Set AZURE_OPENAI_API_KEY "
@@ -310,7 +307,6 @@ DO NOT OUTPUT ANYTHING OTHER THAN JSON, AND DO NOT DEVIATE FROM THIS SCHEMA:
                 api_key=self.azure_openai_key,
                 model=self.azure_deployment,
                 azure_endpoint=self.azure_openai_endpoint,
-                api_version=self.api_version,
             )
         elif self.azure_credential:
             logger.info("[AgentFramework-Magentic] Using managed identity authentication for Azure OpenAI")
@@ -318,7 +314,6 @@ DO NOT OUTPUT ANYTHING OTHER THAN JSON, AND DO NOT DEVIATE FROM THIS SCHEMA:
                 credential=self.azure_credential,
                 model=self.azure_deployment,
                 azure_endpoint=self.azure_openai_endpoint,
-                api_version=self.api_version,
             )
         else:
             raise RuntimeError(
@@ -519,7 +514,7 @@ DO NOT OUTPUT ANYTHING OTHER THAN JSON, AND DO NOT DEVIATE FROM THIS SCHEMA:
             agent_kwargs: Dict[str, Any] = {
                 **defaults,
                 "client": participant_client,
-                "default_options": ChatOptions(model=self.azure_deployment),
+                "default_options": ChatOptions(model=self.openai_model_name),
             }
             
             # Apply tool filtering for this participant's domain

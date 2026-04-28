@@ -86,11 +86,6 @@ resource "azurerm_container_app" "backend" {
       }
 
       env {
-        name  = "AZURE_OPENAI_API_VERSION"
-        value = var.openai_api_version
-      }
-
-      env {
         name  = "AZURE_OPENAI_EMBEDDING_DEPLOYMENT"
         value = var.openai_embedding_deployment_name
       }

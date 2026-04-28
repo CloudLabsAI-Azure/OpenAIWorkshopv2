@@ -80,7 +80,7 @@ class Agent(ToolCallTrackingMixin, BaseAgent):
             return
 
         # Validate configuration
-        if not all([self.azure_deployment, self.azure_openai_endpoint, self.api_version]):
+        if not all([self.azure_deployment, self.azure_openai_endpoint]):
             raise RuntimeError("Azure OpenAI configuration incomplete.")
         
         if not self.azure_openai_key and not self.azure_credential:
@@ -90,7 +90,6 @@ class Agent(ToolCallTrackingMixin, BaseAgent):
         client_kwargs = {
             "model": self.azure_deployment,
             "azure_endpoint": self.azure_openai_endpoint,
-            "api_version": self.api_version,
         }
         if self.azure_openai_key:
             client_kwargs["api_key"] = self.azure_openai_key
@@ -108,7 +107,7 @@ class Agent(ToolCallTrackingMixin, BaseAgent):
             name="PrimaryAgent",
             instructions=PRIMARY_AGENT_INSTRUCTIONS,
             tools=tools,
-            default_options=ChatOptions(model=self.azure_deployment),
+            default_options=ChatOptions(model=self.openai_model_name),
         )
 
         self._reviewer = FrameworkAgent(
@@ -116,7 +115,7 @@ class Agent(ToolCallTrackingMixin, BaseAgent):
             name="Reviewer",
             instructions=REVIEWER_INSTRUCTIONS,
             tools=tools,
-            default_options=ChatOptions(model=self.azure_deployment),
+            default_options=ChatOptions(model=self.openai_model_name),
         )
 
         # Initialize agents
