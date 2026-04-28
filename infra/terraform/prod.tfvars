@@ -14,7 +14,6 @@ create_openai_deployment = true
 openai_deployment_name   = "gpt-5.2-chat"
 openai_model_name        = "gpt-5.2-chat"
 openai_model_version     = "2025-12-11"
-openai_api_version       = "2025-04-01-preview"
 openai_deployment_capacity = 200  # 200k tokens/minute
 
 # OpenAI embedding deployment configuration

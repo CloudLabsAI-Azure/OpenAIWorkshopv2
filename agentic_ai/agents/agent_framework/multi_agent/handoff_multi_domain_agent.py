@@ -286,10 +286,10 @@ class Agent(ToolCallTrackingMixin, BaseAgent):
         has_api_key = bool(self.azure_openai_key)
         has_credential = bool(self.azure_credential)
 
-        if not all([self.azure_deployment, self.azure_openai_endpoint, self.api_version]):
+        if not all([self.azure_deployment, self.azure_openai_endpoint]):
             raise RuntimeError(
                 "Azure OpenAI configuration is incomplete. Ensure "
-                "AZURE_OPENAI_CHAT_DEPLOYMENT, AZURE_OPENAI_ENDPOINT, and AZURE_OPENAI_API_VERSION are set."
+                "AZURE_OPENAI_CHAT_DEPLOYMENT and AZURE_OPENAI_ENDPOINT are set."
             )
         if not has_api_key and not has_credential:
             raise RuntimeError(
@@ -311,7 +311,6 @@ class Agent(ToolCallTrackingMixin, BaseAgent):
                 api_key=self.azure_openai_key,
                 model=self.azure_deployment,
                 azure_endpoint=self.azure_openai_endpoint,
-                api_version=self.api_version,
             )
             logger.info("[HANDOFF] Using API key authentication for Azure OpenAI")
         else:
@@ -319,7 +318,6 @@ class Agent(ToolCallTrackingMixin, BaseAgent):
                 credential=self.azure_credential,
                 model=self.azure_deployment,
                 azure_endpoint=self.azure_openai_endpoint,
-                api_version=self.api_version,
             )
             logger.info("[HANDOFF] Using managed identity authentication for Azure OpenAI")
 

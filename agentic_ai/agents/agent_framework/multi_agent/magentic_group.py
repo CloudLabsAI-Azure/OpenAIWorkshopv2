@@ -295,10 +295,15 @@ DO NOT OUTPUT ANYTHING OTHER THAN JSON, AND DO NOT DEVIATE FROM THIS SCHEMA:
         return cleaned_answer
 
     def _validate_configuration(self) -> None:
-        if not all([self.azure_openai_key, self.azure_deployment, self.azure_openai_endpoint, self.api_version]):
+        if not all([self.azure_deployment, self.azure_openai_endpoint]):
             raise RuntimeError(
-                "Azure OpenAI configuration is incomplete. Ensure AZURE_OPENAI_API_KEY, "
-                "AZURE_OPENAI_CHAT_DEPLOYMENT, AZURE_OPENAI_ENDPOINT, and AZURE_OPENAI_API_VERSION are set."
+                "Azure OpenAI configuration is incomplete. Ensure AZURE_OPENAI_CHAT_DEPLOYMENT "
+                "and AZURE_OPENAI_ENDPOINT are set."
+            )
+        if not self.azure_openai_key and not getattr(self, "azure_credential", None):
+            raise RuntimeError(
+                "Azure OpenAI authentication is not configured. Set AZURE_OPENAI_API_KEY "
+                "or provide a managed-identity credential."
             )
 
     def _build_headers(self) -> Dict[str, str]:
@@ -376,7 +381,6 @@ DO NOT OUTPUT ANYTHING OTHER THAN JSON, AND DO NOT DEVIATE FROM THIS SCHEMA:
                 api_key=self.azure_openai_key,
                 model=self.azure_deployment,
                 azure_endpoint=self.azure_openai_endpoint,
-                api_version=self.api_version,
             )
         elif self.azure_credential:
             logger.info("[AgentFramework-Magentic] Using managed identity authentication for Azure OpenAI")
@@ -384,7 +388,6 @@ DO NOT OUTPUT ANYTHING OTHER THAN JSON, AND DO NOT DEVIATE FROM THIS SCHEMA:
                 credential=self.azure_credential,
                 model=self.azure_deployment,
                 azure_endpoint=self.azure_openai_endpoint,
-                api_version=self.api_version,
             )
         else:
             raise RuntimeError(

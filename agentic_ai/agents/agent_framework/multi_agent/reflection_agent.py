@@ -80,7 +80,7 @@ class Agent(ToolCallTrackingMixin, BaseAgent):
             return
 
         # Validate configuration
-        if not all([self.azure_deployment, self.azure_openai_endpoint, self.api_version]):
+        if not all([self.azure_deployment, self.azure_openai_endpoint]):
             raise RuntimeError("Azure OpenAI configuration incomplete.")
         
         if not self.azure_openai_key and not self.azure_credential:
@@ -90,7 +90,6 @@ class Agent(ToolCallTrackingMixin, BaseAgent):
         client_kwargs = {
             "model": self.azure_deployment,
             "azure_endpoint": self.azure_openai_endpoint,
-            "api_version": self.api_version,
         }
         if self.azure_openai_key:
             client_kwargs["api_key"] = self.azure_openai_key
