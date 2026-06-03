@@ -708,6 +708,9 @@ async def main():
     mcp_uri = os.getenv("MCP_SERVER_URI", "http://localhost:8000/mcp")
     mcp_tool = MCPStreamableHTTPTool(name="contoso_mcp", url=mcp_uri, timeout=30)
 
+    # Strip the OpenAI-v1 path if pasted from Foundry; the client appends Azure paths itself.
+    endpoint = endpoint.rstrip("/").removesuffix("/openai/v1").removesuffix("/openai") + "/"
+
     async with mcp_tool:
         chat_client = OpenAIChatClient(
             api_key=api_key,
