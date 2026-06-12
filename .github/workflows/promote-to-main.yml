@@ -12,18 +12,39 @@ on:
     branches:
       - int-agentic
     paths-ignore:
+      # Documentation & prose
       - '**/*.md'
       - 'docs/**'
       - 'LICENSE'
+      # Sample env templates (never loaded at runtime)
+      - '**/.env.sample'
+      - '**/.env.example'
+      # Repo / editor metadata
+      - '**/.gitignore'
+      - '.gitattributes'
+      - '.editorconfig'
+      - '.vscode/**'
+      - '.idea/**'
+      # GitHub metadata that doesn't affect app behavior
+      - '.github/CODEOWNERS'
+      - '.github/ISSUE_TEMPLATE/**'
+      - '.github/PULL_REQUEST_TEMPLATE/**'
+      - '.github/dependabot.yml'
   workflow_dispatch:  # Allow manual trigger
 
 permissions:
   contents: read
   pull-requests: write
 
+# Only the most recent promotion attempt matters; supersede older ones.
+concurrency:
+  group: promote-to-main
+  cancel-in-progress: true
+
 jobs:
   promote:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -32,8 +53,37 @@ jobs:
 
       - name: Create or update PR to main
         env:
+          # Prefer GH_PAT (allows PR-trigger semantics on downstream workflows
+          # AND bypasses the org-level "Allow GitHub Actions to create or
+          # approve pull requests" restriction).
+          # Falls back to GITHUB_TOKEN if GH_PAT is unset or invalid. With
+          # GITHUB_TOKEN the workflow can still update an existing promotion
+          # PR, but org policy may block creation of a new one — in which
+          # case we surface a clear warning and exit 0 so this advisory
+          # workflow doesn't keep showing as red CI noise.
           GH_TOKEN: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
+          FALLBACK_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set +e  # we handle errors explicitly so we can soft-fail
+
+          # Skip when int-agentic == main (nothing to promote, branches in sync).
+          COMMITS_AHEAD=$(git rev-list --count origin/main..HEAD)
+          if [ "$COMMITS_AHEAD" = "0" ]; then
+            echo "✅ int-agentic is in sync with main (0 commits ahead) — nothing to promote."
+            exit 0
+          fi
+          echo "ℹ️  int-agentic is ${COMMITS_AHEAD} commit(s) ahead of main."
+
+          # Probe the token; on auth failure, fall back to GITHUB_TOKEN.
+          USING_FALLBACK=false
+          if ! gh auth status >/dev/null 2>&1; then
+            echo "⚠️  Primary GH_TOKEN failed auth (GH_PAT likely expired). Falling back to GITHUB_TOKEN."
+            echo "   To restore full automation, refresh the GH_PAT secret in repo settings"
+            echo "   (Settings → Secrets and variables → Actions → GH_PAT)."
+            export GH_TOKEN="$FALLBACK_TOKEN"
+            USING_FALLBACK=true
+          fi
+
           # Check if there's already an open PR from int-agentic → main
           EXISTING_PR=$(gh pr list \
             --base main \
@@ -73,7 +123,7 @@ jobs:
 
             RECENT_COMMITS=$(git log origin/main..HEAD --oneline --no-merges | head -20)
 
-            gh pr create \
+            CREATE_OUTPUT=$(gh pr create \
               --base main \
               --head int-agentic \
               --title "Promote: int-agentic → main (production)" \
@@ -93,7 +143,29 @@ jobs:
           - Merging this PR will trigger a full production deployment
 
           ---
-          _Created: $(date -u '+%Y-%m-%d %H:%M UTC') by commit ${{ github.sha }}_"
+          _Created: $(date -u '+%Y-%m-%d %H:%M UTC') by commit ${{ github.sha }}_" 2>&1)
+            CREATE_EXIT=$?
 
-            echo "✅ New PR created"
+            if [ $CREATE_EXIT -eq 0 ]; then
+              echo "✅ New PR created"
+              echo "$CREATE_OUTPUT"
+            else
+              echo "$CREATE_OUTPUT"
+              if [ "$USING_FALLBACK" = "true" ] && echo "$CREATE_OUTPUT" | grep -qi "not permitted to create or approve pull requests"; then
+                echo ""
+                echo "⚠️  Org policy blocks GitHub Actions from creating PRs with GITHUB_TOKEN."
+                echo "   To restore automation, either:"
+                echo "     1) Refresh the GH_PAT secret (recommended), OR"
+                echo "     2) Enable 'Allow GitHub Actions to create and approve pull requests'"
+                echo "        in Settings → Actions → General → Workflow permissions"
+                echo ""
+                echo "   In the meantime, open the promotion PR manually:"
+                echo "     gh pr create --base main --head int-agentic --title 'Promote: int-agentic → main'"
+                echo ""
+                echo "   Exiting 0 — this is an advisory workflow and the missing PR does"
+                echo "   not block production deploys (push-to-main triggers the full CI)."
+                exit 0
+              fi
+              exit $CREATE_EXIT
+            fi
           fi
